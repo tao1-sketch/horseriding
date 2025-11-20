@@ -1,0 +1,47 @@
+
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8" />
+    <title>말 경주 추첨기</title>
+    <link rel="stylesheet" href="style.css">
+
+</head>
+<body>
+    <div class="app">
+        <h1>말 경주 추첨기</h1>
+        <div class="layout">
+            <div class="panel">
+                <div>
+                    <label for="names3d">참가자</label>
+                    <textarea id="names3d">
+여기에
+추첨자를
+입력하세요
+</textarea>
+                </div>
+
+                <div class="buttons3d">
+                    <button id="shuffle3d">섞기</button>
+                    <button id="start3d">경주 시작</button>
+                </div>
+
+                <div id="result3d" class="result3d"></div>
+                <div id="legend" class="legend"></div>
+                <div class="hint">
+                    <br>※ 공백, 쉼표, 줄바꿈 인식<br><br>
+                    ※ 본 프로그램을 도박 및사행성 목적으로<br>
+                    사용, 배포 및 개조를 금합니다.<br>
+                </div>
+            </div>
+
+            <div class="canvas-wrap">
+                <canvas id="race3dCanvas"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
+    <script src="script.js"></script>
+</body>
+</html>
