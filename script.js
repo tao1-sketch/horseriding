@@ -6,8 +6,8 @@
             const resultEl = document.getElementById("result3d");
             const legendEl = document.getElementById("legend");
 
-            const BASE_MIN_DURATION = 25000;
-            const BASE_MAX_DURATION = 35000;
+            const BASE_MIN_DURATION = 26000; // 최소경주시간
+            const BASE_MAX_DURATION = 41000; // 최대경주시간
             const TWO_PI = Math.PI * 2;
 
             const baseTrackRadius = 18 * 1.7;
@@ -15,8 +15,8 @@
             let trackWidth = baseTrackWidth;
             let laneGap = 0.8;
 
-            const ellipseScaleX = 7.0; // 트랙크기
-            const ellipseScaleZ = 2.8;
+            const ellipseScaleX = 10.0 + Math.random() * 3.5; 
+            const ellipseScaleZ = 4.0 + Math.random() * 2;
             const trackRadius = baseTrackRadius;
             const thetaStart = Math.PI / 2;
 
@@ -28,7 +28,7 @@
             let horsesGroup = null;
 
             let horses = [];
-            let durations = [];
+            let durations = []; // 말 속도/각 두
             let phases = [];
 
             let winnerIndex = null;
@@ -45,10 +45,15 @@
             let cameraLeaderIndex = 0;
             let lastCameraLeaderSwitchTime = 0;
 
+            let cameraTarget = null;
+            let finalPhaseInitialDir = null;
+
             let contestWindows = [];
 
             let postFinishStartTime = 0;
             let winnerFinishProgress = 1;
+
+            let isPreviewSetup = false;
 
             const horseColors = [
                 0xff5555, 0x55ff55, 0x5599ff, 0xffe066,
@@ -136,7 +141,7 @@
                 trackWidth = Math.max(minWidth, n * horseRadialWidth + extraMargin);
 
                 if (n > 1) {
-                    const safeMargin = 0.4;
+                    const safeMargin = 1.0;
                     laneGap = (trackWidth - safeMargin * 2) / (n - 1);
                     laneGap = Math.max(laneGap, 0.6);
                 } else {
@@ -429,12 +434,32 @@
                 const n = names.length;
                 const halfLane = (n - 1) / 2;
 
+                // 기본 레인 인덱스: -halfLane ~ +halfLane
+                const laneIndices = [];
+                for (let i = 0; i < n; i++) {
+                    laneIndices.push(i - halfLane);
+                }
+
+                // 랜덤 섞기 기준
+                if (!isPreviewSetup && laneIndices.length > 1) {
+                    for (let i = laneIndices.length - 1; i > 0; i--) {
+                        const j = Math.floor(Math.random() * (i + 1));
+                        const tmp = laneIndices[i];
+                        laneIndices[i] = laneIndices[j];
+                        laneIndices[j] = tmp;
+                    }
+                }
+
+
                 names.forEach((name, idx) => {
                     const color = horseColors[idx % horseColors.length];
                     const mesh = createHorseMesh(color);
 
-                    const laneIndex = idx - halfLane;
-                    const laneBaseOffset = laneIndex * laneGap;
+                    // 🔹 더 이상 "idx - halfLane" 를 쓰지 않는다.
+                    //    섞어둔 laneIndices에서 꺼내 쓰기 때문에
+                    //    참가자 입력 순서와 레인(안쪽/바깥쪽)은 완전히 분리됨.
+                    const laneIndex = laneIndices[idx];
+                    const laneBaseOffset = laneIndex * laneGap + 0.01;
                     const laneOffset = laneBaseOffset;
 
                     const pos = getTrackPosition(thetaStart, laneOffset, 0.35);
@@ -479,9 +504,12 @@
                         radial,
                         lastYaw: mesh.rotation.y,
                         forward: null,
+                        overtakeLaneBias: 0,
+                        innerLaneBias: 0,
                         legendItem: item
                     });
                 });
+
 
                 durations = new Array(horses.length).fill(0);
                 phases = horses.map(() => Math.random() * Math.PI * 2);
@@ -586,13 +614,8 @@
                     ;
                 }
 
-                /*let finalCountRand = Math.random();
-                let finalCount = 2;
-                if (finalCountRand < 0.5) finalCount = 2;
-                else if (finalCountRand < 0.85) finalCount = 3;
-                else finalCount = 4;
-                if (finalCount > n) finalCount = n;*/
-                let finalCount = chooseFinalContestCount(n); //시작부터 승자 정할거면 위 주석이랑 바꾸기
+                
+                let finalCount = chooseFinalContestCount(n); 
 
                 const finalGroup = finalIndices.slice(0, finalCount);
 
@@ -606,7 +629,7 @@
                     end: endSec * 1000,
                     indices: finalGroup,
                     isFinal: true,
-                    intensity: 1.7
+                    intensity: 1.7 // 경합구간 조정
                 });
 
                 const microCount = 5 + Math.floor(Math.random() * 8);
@@ -660,6 +683,8 @@
                     h.progress = 0;
                     h.basePPrev = 0;
                     h.laneOffset = h.laneBaseOffset;
+                    h.overtakeLaneBias = 0;
+                    h.innerLaneBias = 0;
 
                     const pos = getTrackPosition(thetaStart, h.laneOffset, 0.35);
                     h.mesh.position.copy(pos);
@@ -679,326 +704,632 @@
             }
 
             function updateRace(time) {
-                if (!running) return;
+    if (!running) return;
 
-                if (raceFinished) {
-                    if (winnerIndex == null || !horses[winnerIndex]) {
-                        running = false;
-                        return;
-                    }
-                    const decelT = clamp((time - postFinishStartTime) / POST_FINISH_DURATION, 0, 1);
-                    const extra = POST_FINISH_EXTRA_PROGRESS * (1 - (1 - decelT) * (1 - decelT));
+    // 경주가 끝난 후 우승마만 조금 더 가다가 감속(승리 연출)
+    if (raceFinished) {
+        if (winnerIndex == null || !horses[winnerIndex]) {
+            running = false;
+            return;
+        }
+        const decelT = clamp((time - postFinishStartTime) / POST_FINISH_DURATION, 0, 1);
+        const extra = POST_FINISH_EXTRA_PROGRESS * (1 - (1 - decelT) * (1 - decelT));
 
-                    const winner = horses[winnerIndex];
+        const winner = horses[winnerIndex];
 
-                    const startP = winnerFinishProgress;
-                    const p = clamp(startP + extra, startP, startP + POST_FINISH_EXTRA_PROGRESS + 0.02);
-                    winner.progress = p;
+        const startP = winnerFinishProgress;
+        const p = clamp(startP + extra, startP, startP + POST_FINISH_EXTRA_PROGRESS + 0.02);
+        winner.progress = p;
 
-                    const angle = TWO_PI * p;
-                    const theta = thetaStart - angle;
-                    const pos = getTrackPosition(theta, winner.laneOffset || 0, 0.35);
+        const angle = TWO_PI * p;
+        const theta = thetaStart - angle;
+        const pos = getTrackPosition(theta, winner.laneOffset || 0, 0.35);
 
-                    const futureP = Math.min(p + 0.01, p + 0.03);
-                    const futureAngle = TWO_PI * futureP;
-                    const futureTheta = thetaStart - futureAngle;
-                    const futurePos = getTrackPosition(futureTheta, winner.laneOffset || 0, 0.35);
+        const futureP = Math.min(p + 0.01, p + 0.03);
+        const futureAngle = TWO_PI * futureP;
+        const futureTheta = thetaStart - futureAngle;
+        const futurePos = getTrackPosition(futureTheta, winner.laneOffset || 0, 0.35);
 
-                    setHorseOrientation(winner, pos, futurePos);
-                    winner.mesh.position.copy(pos);
+        setHorseOrientation(winner, pos, futurePos);
+        winner.mesh.position.copy(pos);
 
-                    const radial = new THREE.Vector3(pos.x, 0, pos.z);
-                    if (radial.lengthSq() > 0.0001) radial.normalize();
-                    winner.radial = radial;
-                    winner.theta = theta;
+        const radial = new THREE.Vector3(pos.x, 0, pos.z);
+        if (radial.lengthSq() > 0.0001) radial.normalize();
+        winner.radial = radial;
+        winner.theta = theta;
 
-                    if (decelT >= 1) {
-                        running = false;
-                    }
-                    return;
-                }
+        if (decelT >= 1) {
+            running = false;
+        }
+        return;
+    }
 
-                const elapsed = time - raceStartTime;
-                const globalT = clamp(elapsed / (raceTotalTime || 1), 0, 1);
+    const elapsed = time - raceStartTime;
+    const globalT = clamp(elapsed / (raceTotalTime || 1), 0, 1);
 
-                const prevProgresses = horses.map(h => h.progress || 0);
+    const prevProgresses = horses.map(h => h.progress || 0);
 
-                let activeContestIndices = [];
-                const contestIntensity = new Array(horses.length).fill(1);
-                const isContestHorse = new Array(horses.length).fill(false);
-                let contestMeanPrev = 0;
-                let useContestMean = false;
+    let activeContestIndices = [];
+    const contestIntensity = new Array(horses.length).fill(1);
+    const isContestHorse = new Array(horses.length).fill(false);
+    let contestMeanPrev = 0;
+    let useContestMean = false;
 
-                contestWindows.forEach(w => {
-                    if (elapsed >= w.start && elapsed <= w.end) {
-                        const idxList = w.indices || [];
-                        for (let i = 0; i < idxList.length; i++) {
-                            const hi = idxList[i];
-                            if (hi >= 0 && hi < horses.length) {
-                                activeContestIndices.push(hi);
-                            }
-                        }
-                    }
-                });
-
-                if (activeContestIndices.length > 1) {
-                    activeContestIndices = Array.from(new Set(activeContestIndices));
-                    let sum = 0;
-                    activeContestIndices.forEach(i => {
-                        isContestHorse[i] = true;
-                        sum += prevProgresses[i];
-                    });
-                    contestMeanPrev = sum / activeContestIndices.length;
-                    useContestMean = true;
-
-                    contestWindows.forEach(w => {
-                        if (elapsed >= w.start && elapsed <= w.end) {
-                            const intensity = typeof w.intensity === "number" ? w.intensity : 1.1;
-                            const idxList = w.indices || [];
-                            for (let i = 0; i < idxList.length; i++) {
-                                const hi = idxList[i];
-                                if (hi >= 0 && hi < horses.length) {
-                                    if (intensity > contestIntensity[hi]) {
-                                        contestIntensity[hi] = intensity;
-                                    }
-                                }
-                            }
-                        }
-                    });
-                }
-
-                const basePs = new Array(horses.length);
-                const newProgresses = new Array(horses.length);
-                let finishCandidateIndex = -1;
-
-                let bestAngle = -Infinity;
-                let worstAngle = Infinity;
-
-                const n = horses.length;
-                const currentLanes = horses.map(h => typeof h.laneOffset === "number" ? h.laneOffset : h.laneBaseOffset);
-                const radialForces = new Array(n).fill(0);
-                const minSpacing = 0.8;
-                const arcThreshold = 0.04;
-
-                for (let i = 0; i < n; i++) {
-                    for (let j = i + 1; j < n; j++) {
-                        let du = Math.abs(prevProgresses[i] - prevProgresses[j]);
-                        if (du > 0.5) du = 1 - du;
-                        if (du > arcThreshold) continue;
-                        const laneI = currentLanes[i];
-                        const laneJ = currentLanes[j];
-                        const dr = laneI - laneJ;
-                        if (Math.abs(dr) >= minSpacing) continue;
-
-                        const behindIdx = prevProgresses[i] < prevProgresses[j] ? i : j;
-                        const aheadIdx = behindIdx === i ? j : i;
-
-                        const laneBehind = currentLanes[behindIdx];
-                        const laneAhead = currentLanes[aheadIdx];
-
-                        let sign;
-                        if (laneBehind >= laneAhead) sign = 1;
-                        else sign = -1;
-
-                        const strength = (minSpacing - Math.abs(dr)) / minSpacing;
-                        radialForces[behindIdx] += sign * strength;
-                        radialForces[aheadIdx] -= sign * strength * 0.3;
-                    }
-                }
-
-                const rankIndices = new Array(n);
-                if (n > 1) {
-                    const progPairs = [];
-                    for (let i = 0; i < n; i++) {
-                        const prog = prevProgresses[i] || 0;
-                        progPairs.push({ idx: i, prog });
-                    }
-                    progPairs.sort((a, b) => b.prog - a.prog);
-                    progPairs.forEach((p, rank) => {
-                        rankIndices[p.idx] = rank;
-                    });
-                }
-
-                horses.forEach((h, idx) => {
-                    const dur = durations[idx] || raceTotalTime || 1;
-                    const baseP = elapsed / dur;
-                    basePs[idx] = baseP;
-
-                    let deltaBase = baseP - (h.basePPrev || 0);
-                    if (deltaBase < 0) deltaBase = 0;
-                    h.basePPrev = baseP;
-
-                    let noiseAmp;
-                    if (globalT < 0.7) noiseAmp = 0.2;
-                    else noiseAmp = 0.2 + 0.15 * ((globalT - 0.7) / 0.3);
-                    noiseAmp = clamp(noiseAmp, 0, 0.35);
-
-                    const tN = time * 0.001 + phases[idx];
-                    let baseNoise = Math.sin(tN * 1.4) * 0.45 + Math.sin(tN * 0.8 + idx) * 0.35;
-                    baseNoise = clamp(baseNoise, -1, 1);
-                    let noiseMul = noiseAmp * baseNoise;
-
-                    let speedMult = 1 + noiseMul;
-
-                    if (useContestMean && isContestHorse[idx]) {
-                        const intensity = contestIntensity[idx] || 1;
-                        const diff = contestMeanPrev - prevProgresses[idx];
-                        const pull = clamp(diff * 2.0 * intensity, -0.45 * intensity, 0.45 * intensity);
-                        speedMult *= 1 + pull;
-
-                        const tLocal = time * 0.001 + phases[idx] * 0.7;
-                        const wiggle = Math.sin(tLocal * 4) * 0.08 * intensity;
-                        speedMult *= 1 + wiggle;
-                    }
-
-                    const laneForAdv = (typeof h.laneOffset === "number" ? h.laneOffset : h.laneBaseOffset);
-                    const laneRatio = clamp((laneForAdv + trackWidth / 2) / Math.max(trackWidth, 0.001), 0, 1);
-                    const innerFactor = 1 - laneRatio;
-
-                    const thetaCorner = thetaStart - TWO_PI * (prevProgresses[idx] || 0);
-                    const cornerAmountSpeed = Math.pow(Math.abs(Math.cos(thetaCorner)), 4);
-                    const cornerSpeedBonus = 0.9 + cornerAmountSpeed * innerFactor * 0.15; //코너값
-
-                    speedMult *= cornerSpeedBonus;
-
-                    if (n > 1 && typeof rankIndices[idx] === "number") {
-                        const rank = rankIndices[idx];
-                        if (rank > 0) {
-                            const place = rank + 1;
-                            const maxPlace = n;
-                            const denom = Math.max(maxPlace - 2, 1);
-                            const rank01 = denom > 0 ? (place - 2) / denom : 0;
-                            const maxAdvEnd = 0.28; //후방이득값
-                            const secondAdvEnd = 0.06;
-                            const baseEnd = secondAdvEnd + (maxAdvEnd - secondAdvEnd) * clamp(rank01, 0, 1);
-                            const stepFactor = Math.floor(globalT * 10) / 10;
-                            const advNow = baseEnd * clamp(stepFactor, 0, 1);
-                            //const advNow = baseEnd * clamp(globalT, 0, 1);
-                            speedMult *= 1 + advNow;
-                        }
-                    }
-
-                    speedMult = clamp(speedMult, 0.4, 2.0);
-
-                    const prevP = prevProgresses[idx];
-                    const pCandidate = prevP + deltaBase * speedMult;
-                    let p = pCandidate;
-                    if (p > 1.0) p = 1.0;
-                    if (p < prevP) p = prevP;
-                    if (pCandidate >= 1.0 && finishCandidateIndex === -1) {
-                        finishCandidateIndex = idx;
-                    }
-                    newProgresses[idx] = p;
-                });
-
-                                const innerBase = -trackWidth / 2 + 0.8;
-                const clampMinLane = -trackWidth / 2 + 0.4;
-                const clampMaxLane = trackWidth / 2 - 0.4;
-
-                horses.forEach((h, idx) => {
-                    const p = newProgresses[idx];
-                    const baseP = basePs[idx];
-
-                    h.progress = p;
-                    h.basePPrev = baseP;
-
-                    const thetaCandidate = thetaStart - TWO_PI * p;
-                    const cornerAmount = Math.pow(Math.abs(Math.cos(thetaCandidate)), 4);
-
-                    const laneIndex = h.laneIndex;
-                    const baseLane = h.laneBaseOffset;
-                    const innerLaneBase = innerBase + laneIndex * (laneGap * 0.8);
-                    const tInwardBase = clamp(globalT * 1.1, 0, 1);
-                    const tInwardCorner = cornerAmount * 0.45;
-                    const tInward = clamp(tInwardBase + tInwardCorner, 0, 1);
-                    const targetLaneBase = baseLane * (1 - tInward) + innerLaneBase * tInward;
-
-                    const radialRepel = radialForces[idx] * 0.6;
-
-                    let desiredLane = targetLaneBase + radialRepel;
-                    desiredLane = clamp(desiredLane, clampMinLane, clampMaxLane);
-                    let hasInnerNeighbor = false;
-                    const myLane = currentLanes[idx];
-                    const myProg = prevProgresses[idx];
-
-                    for (let j = 0; j < n; j++) {
-                        if (j === idx) continue;
-                        const dp = Math.abs(prevProgresses[j] - myProg);
-                        const arcDist = dp > 0.5 ? 1 - dp : dp;
-                        if (arcDist > 0.08) continue;
-                        if (currentLanes[j] < myLane) {
-                            hasInnerNeighbor = true;
-                            break;
-                        }
-                    }
-                    if (!hasInnerNeighbor) {
-                        desiredLane -= 0.35;
-                    }
-                    if (typeof h.laneOffset !== "number") h.laneOffset = h.laneBaseOffset;
-
-                    const baseSmooth = 0.10 + 0.16 * globalT;
-                    const cornerBoost = 0.20 * cornerAmount;
-                    const smoothFactor = baseSmooth + cornerBoost;
-
-                    h.laneOffset += (desiredLane - h.laneOffset) * smoothFactor;
-
-                    const y = 0.35 + Math.sin(time * 0.004 + phases[idx]) * 0.10;
-                    const theta = thetaCandidate;
-                    const pos = getTrackPosition(theta, h.laneOffset, y);
-
-                    const futureP = clamp(p + 0.01, 0, 1.05);
-                    const futureTheta = thetaStart - TWO_PI * futureP;
-                    const futurePos = getTrackPosition(futureTheta, h.laneOffset, y);
-                    setHorseOrientation(h, pos, futurePos);
-
-                    h.mesh.position.copy(pos);
-
-                    const radial = new THREE.Vector3(pos.x, 0, pos.z);
-                    if (radial.lengthSq() > 0.0001) radial.normalize();
-                    h.radial = radial;
-                    h.theta = theta;
-
-                    const angleFromStart = (thetaStart - theta + TWO_PI) % TWO_PI;
-                    if (angleFromStart > bestAngle) {
-                        bestAngle = angleFromStart;
-                        leaderIndex = idx;
-                    }
-                    if (angleFromStart < worstAngle) {
-                        worstAngle = angleFromStart;
-                        lastIndex = idx;
-                    }
-                });
-
-                if (horses.length > 0) {
-                    const newLeader = leaderIndex;
-                    if (newLeader !== cameraLeaderIndex) {
-                        const curIdx = clamp(cameraLeaderIndex, 0, horses.length - 1);
-                        const cur = horses[curIdx];
-                        const nxt = horses[newLeader];
-                        if (cur && nxt) {
-                            const curTheta = typeof cur.theta === "number" ? cur.theta : thetaStart;
-                            const nxtTheta = typeof nxt.theta === "number" ? nxt.theta : thetaStart;
-                            const curProg = (thetaStart - curTheta + TWO_PI) % TWO_PI;
-                            const nxtProg = (thetaStart - nxtTheta + TWO_PI) % TWO_PI;
-                            const diffProg = nxtProg - curProg;
-                            const dt = time - lastCameraLeaderSwitchTime;
-                            if (diffProg > 0.03 || dt > 800) {
-                                cameraLeaderIndex = newLeader;
-                                lastCameraLeaderSwitchTime = time;
-                            }
-                        } else {
-                            cameraLeaderIndex = newLeader;
-                            lastCameraLeaderSwitchTime = time;
-                        }
-                    }
-                }
-
-                if (!raceFinished && finishCandidateIndex !== -1) {
-                    finishRace(finishCandidateIndex, time);
-                    return;
+    // 어떤 말들이 지금 경합 구간에 있는지 체크
+    contestWindows.forEach(w => {
+        if (elapsed >= w.start && elapsed <= w.end) {
+            const idxList = w.indices || [];
+            for (let i = 0; i < idxList.length; i++) {
+                const hi = idxList[i];
+                if (hi >= 0 && hi < horses.length) {
+                    activeContestIndices.push(hi);
                 }
             }
+        }
+    });
 
+    if (activeContestIndices.length > 1) {
+        activeContestIndices = Array.from(new Set(activeContestIndices));
+        let sum = 0;
+        activeContestIndices.forEach(i => {
+            isContestHorse[i] = true;
+            sum += prevProgresses[i];
+        });
+        contestMeanPrev = sum / activeContestIndices.length;
+        useContestMean = true;
+
+        contestWindows.forEach(w => {
+            if (elapsed >= w.start && elapsed <= w.end) {
+                const intensity = typeof w.intensity === "number" ? w.intensity : 1.1;
+                const idxList = w.indices || [];
+                for (let i = 0; i < idxList.length; i++) {
+                    const hi = idxList[i];
+                    if (hi >= 0 && hi < horses.length) {
+                        if (intensity > contestIntensity[hi]) {
+                            contestIntensity[hi] = intensity;
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    const basePs = new Array(horses.length);
+    const newProgresses = new Array(horses.length);
+    let finishCandidateIndex = -1;
+
+    let bestAngle = -Infinity;
+    let worstAngle = Infinity;
+
+    const n = horses.length;
+    const currentLanes = horses.map(h =>
+        typeof h.laneOffset === "number" ? h.laneOffset : h.laneBaseOffset
+    );
+
+    // 서로 너무 붙어 있으면 안쪽/바깥쪽으로 반발시키는 힘
+    const radialForces = new Array(n).fill(0);
+    const minSpacing = 1.0;
+    const arcThreshold = 0.08;
+
+    for (let i = 0; i < n; i++) {
+        for (let j = i + 1; j < n; j++) {
+            let du = Math.abs(prevProgresses[i] - prevProgresses[j]);
+            if (du > 0.5) du = 1 - du;
+            if (du > arcThreshold) continue;
+
+            const laneI = currentLanes[i];
+            const laneJ = currentLanes[j];
+            const dr = laneI - laneJ;
+            if (Math.abs(dr) >= minSpacing) continue;
+
+            const behindIdx = prevProgresses[i] < prevProgresses[j] ? i : j;
+            const aheadIdx = behindIdx === i ? j : i;
+
+            const laneBehind = currentLanes[behindIdx];
+
+            let centerSign = 0;
+            if (laneBehind > 0.05) centerSign = -1;     // 바깥쪽이면 안쪽으로
+            else if (laneBehind < -0.05) centerSign = 1; // 안쪽이면 바깥쪽으로
+
+            const strength = (minSpacing - Math.abs(dr)) / minSpacing;
+
+            if (centerSign !== 0) {
+                const behindScale = 1.25;
+                const aheadScale  = 0.25;
+                radialForces[behindIdx] += centerSign * strength * behindScale;
+                radialForces[aheadIdx]  += centerSign * strength * aheadScale;
+            }
+        }
+    }
+
+    for (let i = 0; i < n; i++) {
+        radialForces[i] = clamp(radialForces[i], -0.7, 0.7);
+    }
+
+    // 현재 순위별 속도 보정
+    const rankIndices = new Array(n);
+    if (n > 1) {
+        const progPairs = [];
+        for (let i = 0; i < n; i++) {
+            const prog = prevProgresses[i] || 0;
+            progPairs.push({ idx: i, prog });
+        }
+        progPairs.sort((a, b) => b.prog - a.prog);
+        progPairs.forEach((p, rank) => {
+            rankIndices[p.idx] = rank;
+        });
+    }
+
+    // 각 말의 "앞으로 나가는 정도" 계산
+    horses.forEach((h, idx) => {
+        const dur = durations[idx] || raceTotalTime || 1;
+        const baseP = elapsed / dur;
+        basePs[idx] = baseP;
+
+        let deltaBase = baseP - (h.basePPrev || 0);
+        if (deltaBase < 0) deltaBase = 0;
+        h.basePPrev = baseP;
+
+        // 속도 노이즈
+        let noiseAmp;
+        if (globalT < 0.7) noiseAmp = 0.2;
+        else noiseAmp = 0.2 + 0.15 * ((globalT - 0.7) / 0.3);
+        noiseAmp = clamp(noiseAmp, 0, 0.35);
+
+        const tN = time * 0.001 + phases[idx];
+        let baseNoise = Math.sin(tN * 1.4) * 0.45 + Math.sin(tN * 0.8 + idx) * 0.35;
+        baseNoise = clamp(baseNoise, -1, 1);
+        let noiseMul = noiseAmp * baseNoise;
+
+        let speedMult = 1 + noiseMul;
+
+        // 경합 구간이면 서로 묶어서 같이 가게 만드는 힘
+        if (useContestMean && isContestHorse[idx]) {
+            const intensity = contestIntensity[idx] || 1;
+            const diff = contestMeanPrev - prevProgresses[idx];
+            const pull = clamp(diff * 2.0 * intensity, -0.45 * intensity, 0.45 * intensity);
+            speedMult *= 1 + pull;
+
+            const tLocal = time * 0.001 + phases[idx] * 0.7;
+            const wiggle = Math.sin(tLocal * 4) * 0.08 * intensity;
+            speedMult *= 1 + wiggle;
+        }
+
+        // 안쪽 레인일수록 약간 유리하게
+        const laneForAdv = (typeof h.laneOffset === "number" ? h.laneOffset : h.laneBaseOffset);
+        const laneRatio = clamp((laneForAdv + trackWidth / 2) / Math.max(trackWidth, 0.001), 0, 1);
+        const innerFactor = 1 - laneRatio;
+
+        const thetaCorner = thetaStart - TWO_PI * (prevProgresses[idx] || 0);
+        const cornerAmountSpeed = Math.pow(Math.abs(Math.cos(thetaCorner)), 4);
+        const cornerSpeedBonus = 0.9 + cornerAmountSpeed * innerFactor * 0.15;
+        speedMult *= cornerSpeedBonus;
+
+        // 뒤에 있을수록(꼴찌 쪽일수록) 막판에 조금 더 끌어올려주는 보정
+        if (n > 1 && typeof rankIndices[idx] === "number") {
+            const rank = rankIndices[idx];
+            if (rank > 0) {
+                const place = rank + 1;
+                const maxPlace = n;
+                const denom = Math.max(maxPlace - 2, 1);
+                const rank01 = denom > 0 ? (place - 2) / denom : 0;
+                const maxAdvEnd = 0.32;
+                const secondAdvEnd = 0.06;
+                const baseEnd = secondAdvEnd + (maxAdvEnd - secondAdvEnd) * clamp(rank01, 0, 1);
+                const stepFactor = Math.floor(globalT * 10) / 10;
+                const advNow = baseEnd * clamp(stepFactor, 0, 1);
+
+                speedMult *= 1 + advNow;
+            }
+        }
+
+        speedMult = clamp(speedMult, 0.4, 2.0);
+
+        const prevP = prevProgresses[idx];
+        const pCandidate = prevP + deltaBase * speedMult;
+        let p = pCandidate;
+        if (p > 1.0) p = 1.0;
+        if (p < prevP) p = prevP;
+        if (pCandidate >= 1.0 && finishCandidateIndex === -1) {
+            finishCandidateIndex = idx;
+        }
+        newProgresses[idx] = p;
+    });
+
+    const innerBase = -trackWidth / 2 + 0.8;
+    const clampMinLane = -trackWidth / 2 + 0.4;
+    const clampMaxLane = trackWidth / 2 - 0.4;
+
+    horses.forEach((h, idx) => {
+        const p = newProgresses[idx];
+        const baseP = basePs[idx];
+
+        h.progress = p;
+        h.basePPrev = baseP;
+
+        const thetaCandidate = thetaStart - TWO_PI * p;
+        const cornerAmount = clamp(Math.pow(Math.abs(Math.cos(thetaCandidate)), 4), 0, 1);
+
+        const laneIndex = h.laneIndex;
+        //const baseLane = h.laneBaseOffset;
+        const innerLaneBase = innerBase + laneIndex * (laneGap * 0.8);
+
+        let radialTarget = radialForces[idx];
+        if (typeof h.radialForce !== "number") h.radialForce = 0;
+
+        const radialLerp = 0.12;
+        let radialStep = (radialTarget - h.radialForce) * radialLerp;
+        const radialMaxStep = 0.07;
+        if (radialStep > radialMaxStep) radialStep = radialMaxStep;
+        else if (radialStep < -radialMaxStep) radialStep = -radialMaxStep;
+
+        let radialSmooth = h.radialForce + radialStep;
+        radialSmooth = clamp(radialSmooth, -0.7, 0.7);
+        h.radialForce = radialSmooth;
+        const radialRepel = radialSmooth * 0.6;
+
+        const baseLaneNow = currentLanes[idx];
+        let desiredLane = baseLaneNow + radialRepel;
+
+        if (typeof h.wanderPhase !== "number") {
+            h.wanderPhase = Math.random() * Math.PI * 2;
+        }
+        const straightFactorLane = 1 - cornerAmount; // 0코너 1직선
+        //const wanderAmp = 0.22 * straightFactorLane;
+        //const wander = Math.sin(time * 0.0013 + h.wanderPhase) * wanderAmp;
+        //desiredLane += wander;
+
+        desiredLane = clamp(desiredLane, clampMinLane, clampMaxLane);
+
+        let hasInnerNeighbor = false;
+        const myLane = currentLanes[idx];
+        const myProg = prevProgresses[idx];
+        let innerBlockLane = clampMinLane;
+
+        let overtakeImmediate = 0;
+        const myPrev = myProg;
+        const myNext = newProgresses[idx];
+        const myStep = myNext - myPrev;
+
+        if (typeof h.overtakeSide !== "number") h.overtakeSide = 0;
+        if (typeof h.overtakeLockUntil !== "number") h.overtakeLockUntil = 0;
+
+        // 추월 판단
+        if (globalT > 0.1 && globalT < 0.95 && myStep > 0) {
+            const now = time;
+            const lockActive = (h.overtakeSide !== 0 && h.overtakeLockUntil > now);
+
+            if (lockActive) {
+                // 이미 추월 중일 때는 같은 방향으로 계속 밀어줌
+                const dir = h.overtakeSide;
+
+                if (typeof h.overtakeAggressiveness !== "number") {
+                    h.overtakeAggressiveness = 0.8 + Math.random() * 0.7;
+                }
+
+                const curvature = clamp(cornerAmount, 0, 1);
+                const straightFactor = 1 - Math.pow(curvature, 1.2);
+                const cornerFactor = 1 - straightFactor;
+
+                const baseMag =
+                    (0.20 + 2.1 * straightFactor + 0.45 * cornerFactor) * h.overtakeAggressiveness;
+
+                overtakeImmediate = dir * baseMag;
+            } else {
+                h.overtakeSide = 0;
+                h.overtakeLockUntil = 0;
+
+                let frontIdx = -1;
+                let bestDu = 1e9;
+
+                for (let j = 0; j < n; j++) {
+                    if (j === idx) continue;
+                    const otherPrev = prevProgresses[j];
+                    let du = otherPrev - myPrev;
+                    if (du <= 0) continue; // 뒤에 있으면 무시
+                    let arc = Math.abs(du);
+                    if (arc > 0.5) arc = 1 - arc;
+                    if (arc > 0.09) continue;
+                    if (arc < bestDu) {
+                        bestDu = arc;
+                        frontIdx = j;
+                    }
+                }
+
+                if (frontIdx !== -1) {
+                    const otherPrev = prevProgresses[frontIdx];
+                    const otherNext = newProgresses[frontIdx];
+                    const otherStep = otherNext - otherPrev;
+
+                    // 추월 판단(빠를 때)
+                    const fasterEnough = myStep > otherStep + 0.000005;
+                    if (fasterEnough) {
+                        let blockedLeft = false;
+                        let blockedRight = false;
+                        const neighborArc = 0.10;
+
+                        for (let k = 0; k < n; k++) {
+                            if (k === idx) continue;
+                            const kPrev = prevProgresses[k];
+                            let dp2 = Math.abs(kPrev - myPrev);
+                            if (dp2 > 0.5) dp2 = 1 - dp2;
+                            if (dp2 > neighborArc) continue;
+
+                            const laneK = currentLanes[k];
+                            const laneDiff = laneK - myLane;
+                            if (laneDiff < -0.25 && Math.abs(laneDiff) < minSpacing) {
+                                blockedLeft = true;
+                            } else if (laneDiff > 0.25 && Math.abs(laneDiff) < minSpacing) {
+                                blockedRight = true;
+                            }
+                        }
+
+                        const laneMargin = 0.3;
+                        const canLeft = (myLane > clampMinLane + laneMargin) && !blockedLeft;
+                        const canRight = (myLane < clampMaxLane - laneMargin) && !blockedRight;
+
+                        if (canLeft || canRight) {
+                            const dir = canLeft ? -1 : 1;
+                            h.overtakeSide = dir;
+                            const lockDuration = 900 + Math.random() * 550;
+                            h.overtakeLockUntil = now + lockDuration;
+
+                            if (typeof h.overtakeAggressiveness !== "number") {
+                                h.overtakeAggressiveness = 0.8 + Math.random() * 0.7;
+                            }
+
+                            const curvature = clamp(cornerAmount, 0, 1);
+                            const straightFactor = 1 - Math.pow(curvature, 1.2);
+                            const cornerFactor = 1 - straightFactor;
+
+                            const baseMag =
+                                (0.20 + 2.1 * straightFactor + 0.45 * cornerFactor) * h.overtakeAggressiveness;
+
+                            overtakeImmediate = dir * baseMag;
+                        }
+                    }
+                }
+            }
+        } else {
+            h.overtakeSide = 0;
+            h.overtakeLockUntil = 0;
+        }
+
+        // 추월 강도
+        if (typeof h.overtakeLaneBias !== "number") {
+            h.overtakeLaneBias = 0;
+        }
+        let targetBias = overtakeImmediate;
+
+        if (Math.sign(targetBias) !== Math.sign(h.overtakeLaneBias) &&
+            Math.abs(h.overtakeLaneBias) > 0.05) {
+            targetBias = 0;
+        }
+
+        const biasLerp = 0.12;
+        let storedBias = h.overtakeLaneBias + (targetBias - h.overtakeLaneBias) * biasLerp;
+        storedBias *= 0.985;
+
+        const biasMax = Math.max(1.2, trackWidth * 0.6);
+        storedBias = clamp(storedBias, -biasMax, biasMax);
+
+        h.overtakeLaneBias = storedBias;
+
+        desiredLane += h.overtakeLaneBias;
+        // 코너 감압
+        {
+            const laneSpan = (clampMaxLane - clampMinLane) || 1;
+            const outer01 = clamp((myLane - clampMinLane) / laneSpan, 0, 1);
+            const inner01 = 1 - outer01;
+
+            if (typeof h.cornerOutwardFactor !== "number") {
+                h.cornerOutwardFactor = 1.0 + Math.random() * 0.6;
+            }
+            if (typeof h.cornerLaneBias !== "number") {
+                h.cornerLaneBias = (Math.random() - 0.5) * 0.2;
+            }
+
+            const curvature = clamp(cornerAmount, 0, 1);
+            const cornerStrength = Math.pow(curvature, 1.15);
+
+            let segBias = 0;
+            if (cornerStrength > 0.01) {
+                const baseAmp = 0.85 * h.cornerOutwardFactor;
+
+                let laneSigned = inner01 - outer01;
+                laneSigned += h.cornerLaneBias;
+                laneSigned = clamp(laneSigned, -1, 1);
+
+                let signScale;
+                if (laneSigned >= 0) {
+                    signScale = 8.5 + 9.8 * inner01;
+                } else {
+                    signScale = 10.2 + 10.0 * outer01;
+                }
+
+                segBias = baseAmp * signScale * laneSigned * cornerStrength;
+            }
+
+            if (segBias !== 0) {
+                desiredLane += segBias;
+            }
+        }
+
+        for (let j = 0; j < n; j++) {
+            if (j === idx) continue;
+            let dp = Math.abs(prevProgresses[j] - myProg);
+            let arcDist = dp > 0.5 ? 1 - dp : dp;
+            if (arcDist > 0.035) continue; // 거의 옆에 나란히 있을 때만
+            const laneJ = currentLanes[j];
+            if (laneJ < myLane) {
+                hasInnerNeighbor = true;
+                const safeLane = laneJ + minSpacing * 0.5;
+                if (safeLane > innerBlockLane) innerBlockLane = safeLane;
+            }
+        }
+
+        if (typeof h.innerLaneBias !== "number") h.innerLaneBias = 0;
+        {
+            const laneSpanIn = (clampMaxLane - clampMinLane) || 1;
+            const outer01In = clamp((myLane - clampMinLane) / laneSpanIn, 0, 1); // 0안쪽 1바깥쪽
+
+            const curvature = clamp(cornerAmount, 0, 1);
+            const straightFactor = 1 - Math.pow(curvature, 1.1); // 0코너 1직선
+
+            let targetLaneInner;
+            if (hasInnerNeighbor) {
+                targetLaneInner = innerBlockLane;
+            } else {
+                targetLaneInner = clampMinLane + 0.05;
+            }
+
+            let targetInnerBias = 0;
+            if (desiredLane > targetLaneInner) {
+                const diff = targetLaneInner - desiredLane; // 음수가 안쪽 방향
+                const strength = (0.55 + 0.40 * outer01In) * straightFactor;
+                targetInnerBias = diff * strength;
+            } else {
+                targetInnerBias = 0;
+            }
+
+            const innerLerp = 0.08;
+            h.innerLaneBias += (targetInnerBias - h.innerLaneBias) * innerLerp;
+            h.innerLaneBias *= 0.995;
+
+            desiredLane += h.innerLaneBias;
+            desiredLane = clamp(desiredLane, clampMinLane, clampMaxLane);
+        }
+        /*{
+            const curvature = clamp(cornerAmount, 0, 1);
+            const straightFactor = 1 - Math.pow(curvature, 1.15); // 1: 직선, 0: 코너
+
+            const laneSpanIn = (clampMaxLane - clampMinLane) || 1;
+            const outer01In = clamp((myLane - clampMinLane) / laneSpanIn, 0, 1);
+
+            let inward = 0.35 * straightFactor * (0.25 + 0.8 * outer01In);
+
+            if (hasInnerNeighbor) {
+                inward *= 0.8;
+            }
+
+            desiredLane -= inward;
+        }*/ // 안쪽 보간
+
+        // 원하는 레인 값 부드럽게 보간 smoother
+        if (typeof h.desiredLaneSmooth !== "number") {
+            h.desiredLaneSmooth = desiredLane;
+        } else {
+            const dlAlpha = 0.18;
+            h.desiredLaneSmooth += (desiredLane - h.desiredLaneSmooth) * dlAlpha;
+        }
+        const finalDesiredLane = h.desiredLaneSmooth;
+
+         if (typeof h.laneOffset !== "number") {
+            h.laneOffset = h.laneBaseOffset;
+        }
+
+        if (typeof h.laneSmoothingTime !== "number") {
+            h.laneSmoothingTime = 400 + Math.random() * 700; // 추입 강도 랜덤
+        }
+
+        // 레인 간격 기준 거리
+        let typicalDistance = laneGap;
+        if (!typicalDistance || !isFinite(typicalDistance)) {
+            const denom = Math.max(n - 1, 1);
+            typicalDistance = denom > 0 ? (trackWidth / denom) : 1;
+        }
+
+        // 추입 시간
+        const minSec = Math.max(h.laneSmoothingTime, 120) / 1000;
+        const maxSpeed = (typicalDistance / minSec) * 0.85;
+
+        // 프레임 간 시간 간격 계산
+        let dtSec = 0.016;
+        if (typeof h.lastLaneUpdateTime === "number") {
+            const dt = time - h.lastLaneUpdateTime;
+            if (dt > 0 && dt < 200) { // 0.2초 이상 튀는 프레임 무시
+                dtSec = dt / 1000;
+            }
+        }
+        h.lastLaneUpdateTime = time;
+
+        const maxDelta = maxSpeed * dtSec; // 해당 프레임에 허용되는 최대 레인 이동량
+
+        let laneDiff = finalDesiredLane - h.laneOffset;
+        const absDiff = Math.abs(laneDiff);
+        if (absDiff > maxDelta) {
+            laneDiff = (laneDiff > 0 ? 1 : -1) * maxDelta;
+        }
+
+        h.laneOffset += laneDiff;
+        h.laneOffset = clamp(h.laneOffset, clampMinLane, clampMaxLane);
+
+
+        // 실제 위치/자세 업데이트
+        const y = 0.35 + Math.sin(time * 0.004 + phases[idx]) * 0.10;
+        const theta = thetaCandidate;
+        const rawPos = getTrackPosition(theta, h.laneOffset, y);
+        if (!h.renderPos) {
+            h.renderPos = rawPos.clone();
+        } else {
+            const posAlpha = 0.35;
+            h.renderPos.lerp(rawPos, posAlpha);
+        }
+        const pos = h.renderPos;
+
+        const futureP = clamp(p + 0.01, 0, 1.05);
+        const futureTheta = thetaStart - TWO_PI * futureP;
+        const futurePos = getTrackPosition(futureTheta, h.laneOffset, y);
+        setHorseOrientation(h, pos, futurePos);
+
+        h.mesh.position.copy(pos);
+
+        const radial = new THREE.Vector3(pos.x, 0, pos.z);
+        if (radial.lengthSq() > 0.0001) radial.normalize();
+        h.radial = radial;
+        h.theta = theta;
+
+        const angleFromStart = (thetaStart - theta + TWO_PI) % TWO_PI;
+        if (angleFromStart > bestAngle) {
+            bestAngle = angleFromStart;
+            leaderIndex = idx;
+        }
+        if (angleFromStart < worstAngle) {
+            worstAngle = angleFromStart;
+            lastIndex = idx;
+        }
+    });
+
+    // 카메라가 따라갈 리더 인덱스 갱신
+    if (horses.length > 0) {
+        const newLeader = leaderIndex;
+        if (newLeader !== cameraLeaderIndex) {
+            const curIdx = clamp(cameraLeaderIndex, 0, horses.length - 1);
+            const cur = horses[curIdx];
+            const nxt = horses[newLeader];
+            if (cur && nxt) {
+                const curTheta = typeof cur.theta === "number" ? cur.theta : thetaStart;
+                const nxtTheta = typeof nxt.theta === "number" ? nxt.theta : thetaStart;
+                const curProg = (thetaStart - curTheta + TWO_PI) % TWO_PI;
+                const nxtProg = (thetaStart - nxtTheta + TWO_PI) % TWO_PI;
+                const diffProg = nxtProg - curProg;
+                const dt = time - lastCameraLeaderSwitchTime;
+                if (diffProg > 0.03 || dt > 800) {
+                    cameraLeaderIndex = newLeader;
+                    lastCameraLeaderSwitchTime = time;
+                }
+            } else {
+                cameraLeaderIndex = newLeader;
+                lastCameraLeaderSwitchTime = time;
+            }
+        }
+    }
+
+    if (!raceFinished && finishCandidateIndex !== -1) {
+        finishRace(finishCandidateIndex, time);
+        return;
+    }
+}
             function finishRace(winnerIdx, time) {
                 if (raceFinished) return;
                 raceFinished = true;
@@ -1029,15 +1360,22 @@
                 const pos = h.mesh.position.clone();
                 const radial = h.radial || new THREE.Vector3(pos.x, 0, pos.z).normalize();
 
-                const sideDist = 7.0;
+                const sideDist = 8.5;
                 const height = 3.0;
 
                 const camPos = pos.clone()
                     .add(radial.clone().multiplyScalar(sideDist))
                     .add(new THREE.Vector3(0, height, 0));
 
-                camera.position.lerp(camPos, 0.12);
-                camera.lookAt(pos.clone().add(new THREE.Vector3(0, 1.0, 0)));
+                camera.position.lerp(camPos, 0.08);
+
+                const target = pos.clone().add(new THREE.Vector3(0, 1.0, 0));
+                if (!cameraTarget) {
+                    cameraTarget = target.clone();
+                } else {
+                    cameraTarget.lerp(target, 0.12);
+                }
+                camera.lookAt(cameraTarget);
             }
 
             function frontLeaderCamera() {
@@ -1052,15 +1390,22 @@
                 }
                 forward = forward.clone().normalize();
 
-                const distAhead = 9.0;
-                const height = 3.5;
+                const distAhead = ellipseScaleX; // 긴 축
+                const height = ellipseScaleZ; // 짧은 축
 
                 const camPos = pos.clone()
                     .add(forward.clone().multiplyScalar(distAhead))
                     .add(new THREE.Vector3(0, height, 0));
 
-                camera.position.lerp(camPos, 0.12);
-                camera.lookAt(pos.clone().add(new THREE.Vector3(0, 1.2, 0)));
+                camera.position.lerp(camPos, 0.10);
+
+                const target = pos.clone().add(new THREE.Vector3(0, 1.2, 0));
+                if (!cameraTarget) {
+                    cameraTarget = target.clone();
+                } else {
+                    cameraTarget.lerp(target, 0.15);
+                }
+                camera.lookAt(cameraTarget);
             }
 
             function aerialAllHorsesCamera() {
@@ -1080,8 +1425,77 @@
                 const forwardOffset = maxDist * 0.4;
 
                 const camPos = center.clone().add(new THREE.Vector3(0, height, forwardOffset));
-                camera.position.lerp(camPos, 0.12);
-                camera.lookAt(center.clone().add(new THREE.Vector3(0, 1.0, 0)));
+                camera.position.lerp(camPos, 0.10);
+
+                const target = center.clone().add(new THREE.Vector3(0, 1.0, 0));
+                if (!cameraTarget) {
+                    cameraTarget = target.clone();
+                } else {
+                    cameraTarget.lerp(target, 0.15);
+                }
+                camera.lookAt(cameraTarget);
+            }
+
+
+            function finalPhaseCamera(remainingSec) {
+                const h = getLeaderHorse();
+                if (!h) return;
+
+                const pos = h.mesh.position.clone();
+
+                
+                let forward = h.forward;
+                if (!forward || forward.lengthSq() < 1e-6) {
+                    const radial = h.radial || new THREE.Vector3(pos.x, 0, pos.z).normalize();
+                    forward = new THREE.Vector3(-radial.z, 0, radial.x);
+                }
+                forward = forward.clone().normalize();
+
+                
+                const side = new THREE.Vector3(-forward.z, 0, forward.x).normalize();
+
+                
+                let camDirNow = camera.position.clone().sub(pos);
+                camDirNow.y = 0;
+                if (camDirNow.lengthSq() < 1e-4) {
+                    camDirNow.copy(side);
+                }
+                camDirNow.normalize();
+                if (!finalPhaseInitialDir) {
+                    finalPhaseInitialDir = camDirNow.clone();
+                }
+
+                let dir;
+                if (remainingSec > 3) {
+                    let t = (5 - remainingSec) / 2;
+                    if (t < 0) t = 0;
+                    if (t > 1) t = 1;
+
+                    dir = finalPhaseInitialDir.clone().multiplyScalar(1 - t)
+                        .add(side.clone().multiplyScalar(t));
+                    if (dir.lengthSq() < 1e-4) dir.copy(side);
+                    dir.normalize();
+                } else {
+                    
+                    dir = side.clone();
+                }
+
+                const dist = 27.0;
+                const height = 3.2;
+
+                const camPos = pos.clone()
+                    .add(dir.clone().multiplyScalar(dist))
+                    .add(new THREE.Vector3(0, height, 0));
+
+                camera.position.lerp(camPos, 0.1);
+
+                const target = pos.clone().add(new THREE.Vector3(0, 1.0, 0));
+                if (!cameraTarget) {
+                    cameraTarget = target.clone();
+                } else {
+                    cameraTarget.lerp(target, 0.15);
+                }
+                camera.lookAt(cameraTarget);
             }
 
             function winnerCloseUpCamera() {
@@ -1114,89 +1528,42 @@
             function updateCamera(time) {
                 if (introActive && horses.length) {
                     const totalIntro = 3000;
-                    const groupShotDuration = 800;
                     const now = time;
                     const elapsedIntro = Math.max(0, now - introStartTime);
-                    const singlePhase = Math.max(0, totalIntro - groupShotDuration);
+                    const t = clamp(elapsedIntro / totalIntro, 0, 1);
 
-                    if (elapsedIntro >= totalIntro || singlePhase <= 0) {
-                        // fallback to group front view
-                        if (horses.length) {
-                            let center = new THREE.Vector3(0, 0, 0);
-                            horses.forEach(h => center.add(h.mesh.position));
-                            center.multiplyScalar(1 / horses.length);
-
-                            let forward = horses[0].forward;
-                            if (!forward || forward.lengthSq() < 1e-6) {
-                                const radial = horses[0].radial || new THREE.Vector3(center.x, 0, center.z).normalize();
-                                forward = new THREE.Vector3(-radial.z, 0, radial.x);
-                            }
-                            forward.normalize();
-
-                            const spread = trackWidth || 3;
-                            const distAhead = Math.max(6.0, spread * 1.8);
-                            const height = 3.5;
-
-                            const camPos = center.clone()
-                                .add(forward.clone().multiplyScalar(distAhead))
-                                .add(new THREE.Vector3(0, height, 0));
-
-                            camera.position.lerp(camPos, 0.15);
-                            camera.lookAt(center.clone().add(new THREE.Vector3(0, 1.4, 0)));
-                        }
-                        return;
+                    
+                    
+                    let leftHorse = horses[0];
+                    let rightHorse = horses[0];
+                    for (let i = 1; i < horses.length; i++) {
+                        const h = horses[i];
+                        if (h.laneIndex < leftHorse.laneIndex) leftHorse = h;
+                        if (h.laneIndex > rightHorse.laneIndex) rightHorse = h;
                     }
 
-                    if (elapsedIntro >= singlePhase) {
-                        // group front shot
-                        let center = new THREE.Vector3(0, 0, 0);
-                        horses.forEach(h => center.add(h.mesh.position));
-                        center.multiplyScalar(1 / horses.length);
+                    const startPos = leftHorse.mesh.position.clone();
+                    const endPos = rightHorse.mesh.position.clone();
+                    const center = startPos.clone().lerp(endPos, t);
 
-                        let forward = horses[0].forward;
-                        if (!forward || forward.lengthSq() < 1e-6) {
-                            const radial = horses[0].radial || new THREE.Vector3(center.x, 0, center.z).normalize();
-                            forward = new THREE.Vector3(-radial.z, 0, radial.x);
-                        }
-                        forward.normalize();
-
-                        const spread = trackWidth || 3;
-                        const distAhead = Math.max(6.5, spread * 2.0);
-                        const height = 3.8;
-
-                        const camPos = center.clone()
-                            .add(forward.clone().multiplyScalar(distAhead))
-                            .add(new THREE.Vector3(0, height, 0));
-
-                        camera.position.lerp(camPos, 0.18);
-                        camera.lookAt(center.clone().add(new THREE.Vector3(0, 1.5, 0)));
-                        return;
-                    }
-
-                    const perHorse = singlePhase / horses.length;
-                    let index = Math.floor(elapsedIntro / perHorse);
-                    if (index < 0) index = 0;
-                    if (index >= horses.length) index = horses.length - 1;
-
-                    const h = horses[index];
-                    const pos = h.mesh.position.clone();
-
-                    let forward = h.forward;
+                    let forward = horses[0].forward;
                     if (!forward || forward.lengthSq() < 1e-6) {
-                        const radial = h.radial || new THREE.Vector3(pos.x, 0, pos.z).normalize();
+                        const radial = horses[0].radial || new THREE.Vector3(center.x, 0, center.z).normalize();
                         forward = new THREE.Vector3(-radial.z, 0, radial.x);
                     }
                     forward.normalize();
 
-                    const distAhead = 5.0;
-                    const height = 2.5;
+                    const spread = trackWidth || 3;
+                    const distAhead = Math.max(7.0, spread * 2.0);
+                    const height = 3.5;
 
-                    const camPos = pos.clone()
-                        .add(forward.clone().multiplyScalar(distAhead))
+                    
+                    const camPos = center.clone()
+                        .add(forward.clone().multiplyScalar(-distAhead))
                         .add(new THREE.Vector3(0, height, 0));
 
-                    camera.position.lerp(camPos, 0.2);
-                    camera.lookAt(pos.clone().add(new THREE.Vector3(0, 1.5, 0)));
+                    camera.position.lerp(camPos, 0.15);
+                    camera.lookAt(center.clone().add(new THREE.Vector3(0, 1.5, 0)));
                     return;
                 }
 
@@ -1217,7 +1584,7 @@
                     const height = 4.2;
 
                     const camPos = center.clone()
-                        .add(forward.clone().multiplyScalar(distAhead))
+                        .add(forward.clone().multiplyScalar(-distAhead))
                         .add(new THREE.Vector3(0, height, 0));
 
                     camera.position.lerp(camPos, 0.16);
@@ -1232,7 +1599,16 @@
 
                 if (running && horses.length) {
                     const elapsed = time - raceStartTime;
-                    const rt = clamp(elapsed / (raceTotalTime || 1), 0, 1);
+                    const total = raceTotalTime || 1;
+                    const rt = clamp(elapsed / total, 0, 1);
+                    const remaining = total - elapsed;
+                    const remainingSec = remaining / 1000;
+
+                    
+                    if (remainingSec < 5 && remainingSec > 0) {
+                        finalPhaseCamera(remainingSec);
+                        return;
+                    }
 
                     let mode = "follow";
 
@@ -1249,6 +1625,33 @@
                     return;
                 }
 
+                if (horses.length) {
+
+                    let center = new THREE.Vector3(0, 0, 0);
+                    horses.forEach(h => center.add(h.mesh.position));
+                    center.multiplyScalar(1 / horses.length);
+
+                    let forward = horses[0].forward;
+                    if (!forward || forward.lengthSq() < 1e-6) {
+                        const radial = horses[0].radial || new THREE.Vector3(center.x, 0, center.z).normalize();
+
+                        forward = new THREE.Vector3(-radial.z, 0, radial.x);
+                    }
+                    forward.normalize();
+
+                    const spread = trackWidth || 3;
+                    const distAhead = Math.max(7.0, spread * 2.2);
+                    const height = Math.max(3.5, spread * 0.6);
+
+                    const camPos = center.clone()
+
+                        .add(forward.clone().multiplyScalar(-distAhead))
+                        .add(new THREE.Vector3(0, height, 0));
+
+                    camera.position.lerp(camPos, 0.16);
+                    camera.lookAt(center.clone().add(new THREE.Vector3(0, 1.5, 0)));
+                    return;
+                }                
                 const maxScale = Math.max(ellipseScaleX, ellipseScaleZ);
                 const worldR = (trackRadius + trackWidth) * maxScale;
                 const halfFovRad = camera.fov * Math.PI / 180 * 0.5;
@@ -1306,7 +1709,9 @@
 
             namesTextarea.addEventListener("input", () => {
                 if (!running && !countdownActive) {
+                    isPreviewSetup = true;
                     setupRace();
+                    isPreviewSetup = false;
                 }
             });
         })();
