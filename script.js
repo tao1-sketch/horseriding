@@ -60,6 +60,7 @@
 
     let isPreviewSetup = false;
     let sprintHorseFlags = [];
+    let sprintAssigned = false;
 
     const horseColors = [
         0xff5555, 0x55ff55, 0x5599ff, 0xffe066,
@@ -555,19 +556,20 @@
 
         });
 
-
         durations = new Array(horses.length).fill(0);
         phases = horses.map(() => Math.random() * Math.PI * 2);
 
-        const SPRINT_PROB = Math.random();
-
+        /*const SPRINT_PROB = Math.random()*0.4;
         sprintHorseFlags = new Array(horses.length).fill(false);
         for (let i = 0; i < horses.length; i++) {
             if (Math.random() < SPRINT_PROB) {
                 sprintHorseFlags[i] = true;
             }
-        }
+        }*/
 
+        sprintHorseFlags = new Array(horses.length).fill(false);
+        sprintAssigned = false;
+        // 원래 확률로 복구하려면 주석이랑 교체
         startBtn.disabled = false;
         updateLegendOrder();
     }
@@ -927,6 +929,30 @@
             }*/
             progPairs.forEach((p, rank) => { rankIndices[p.idx] = rank; });
         }
+        
+        const endPhaseGlobal = clamp((7000 - Math.max((raceTotalTime || 0) - elapsed, 0)) / 7000, 0, 1);
+
+        if (!sprintAssigned && endPhaseGlobal > 0 && n > 0) {
+            const MIN_PROB = 0.08;
+            const MAX_PROB = 0.40;
+            const maxPlace = n;
+            const denom = Math.max(maxPlace - 1, 1);
+
+            sprintHorseFlags = new Array(n).fill(false);
+
+            for (let i = 0; i < n; i++) {
+                const r = rankIndices[i];
+                if (typeof r !== "number") continue;
+                const place = r + 1;
+                const rank01 = denom > 0 ? (place - 1) / denom : 0;
+                let p = MIN_PROB + (MAX_PROB - MIN_PROB) * rank01;
+                p = clamp(p, 0, 1);
+                if (Math.random() < p) {
+                    sprintHorseFlags[i] = true;
+                }
+            }
+            sprintAssigned = true;
+        }
 
         horses.forEach((h, idx) => {
             const dur = durations[idx] || raceTotalTime || 1;
@@ -934,7 +960,7 @@
             basePs[idx] = baseP;
             let deltaBase = baseP - (h.basePPrev || 0);
             if (deltaBase < 0) deltaBase = 0;
-            deltaBase *= 1.08; // 느려서 넣은 거니까 빠르면 알아서 나중에 조절
+            deltaBase *= 1.05; // 느려서 넣은 거니까 빠르면 알아서 나중에 조절
             h.basePPrev = baseP;
 
             const speedDebug = {
@@ -988,12 +1014,13 @@
                     const rank01 = denom > 0 ? (place - 2) / denom : 0;
 
                     const stepFactor = Math.floor(globalT * 10) / 10;
-                    const baseMid = 0.02 + 0.10 * rank01;
+                    const baseMid = 0.04 + 0.10 * rank01;
                     midBoost = baseMid * clamp(stepFactor, 0, 1);
 
-                    const endPhase = clamp((7000 - Math.max((raceTotalTime || 0) - elapsed, 0)) / 7000, 0, 1);
+                    //const endPhase = clamp((7000 - Math.max((raceTotalTime || 0) - elapsed, 0)) / 7000, 0, 1);
+                    const endPhase = endPhaseGlobal;
                     if (endPhase > 0 && sprintHorseFlags[idx]) {
-                        const baseFinal = (0.26 + 0.20 * rank01);
+                        const baseFinal = (0.12 + 0.30 * rank01);
                         finalBoost = baseFinal * endPhase;
                     }
                 }
@@ -1007,7 +1034,7 @@
             noiseFactor = clamp(noiseFactor, 0.6, 1.4);
             contestFactor = clamp(contestFactor, 0.5, 3.0);
             laneFactor = clamp(laneFactor, 0.7, 1.8);
-            rankFactor = clamp(rankFactor, 0.2, 4.8);
+            rankFactor = clamp(rankFactor, 0.3, 5.6);
             
             let speedMult = speedDebug.base * noiseFactor * contestFactor * laneFactor * rankFactor;
 
@@ -1054,7 +1081,7 @@
 
                 const radialLerp = 0.12;
                 let radialStep = (radialTarget - h.radialForce) * radialLerp;
-                const radialMaxStep = 0.07;
+                const radialMaxStep = 0.06;
                 if (radialStep > radialMaxStep) radialStep = radialMaxStep;
                 else if (radialStep < -radialMaxStep) radialStep = -radialMaxStep;
 
@@ -1319,7 +1346,7 @@
                 }
 
                 if (typeof h.laneSmoothingTime !== "number") {
-                    h.laneSmoothingTime = 400 + Math.random() * 700; // 추입 강도 랜덤
+                    h.laneSmoothingTime = 400 + Math.random() * 900; // 추입 강도 랜덤
                 }
                 let typicalDistance = laneGap;
                 if (!typicalDistance || !isFinite(typicalDistance)) {
